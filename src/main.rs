@@ -1,4 +1,3 @@
-use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::time::Duration;
 use std::{iter, ptr};
@@ -73,11 +72,11 @@ mod gl {
 /// Texture memory shared between Vulkan and OpenGL.
 #[derive(Debug)]
 struct SharedTexture {
-    /// Backing EGL image.
-    egl_image: egl::Image,
-
     /// wgpu Texture.
     texture: wgpu::Texture,
+
+    /// GL handle to Vulkan texture memory.
+    gl_mem_object: GLuint,
 
     /// GL texture ID.
     gl_texture: GLuint,
@@ -120,7 +119,6 @@ struct State {
     bind_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
 
-    egl_display: egl::Display,
     shared_texture: Option<SharedTexture>,
     semaphores: Semaphores,
 }
@@ -376,7 +374,7 @@ impl WindowHandler for State {
             if let Some(old) = self.shared_texture.take() {
                 unsafe {
                     gl_call!(gl::DeleteTextures(1, &old.gl_texture));
-                    EGL.destroy_image(self.egl_display, old.egl_image).unwrap();
+                    gl_call!(gl::DeleteMemoryObjectsEXT(1, &old.gl_mem_object));
                 }
 
                 old.texture.destroy();
@@ -405,12 +403,10 @@ impl WindowHandler for State {
                         .array_layers(1)
                         .samples(vk::SampleCountFlags::TYPE_1)
                         .tiling(vk::ImageTiling::LINEAR)
-                        .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                        .initial_layout(vk::ImageLayout::UNDEFINED)
+                        .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE)
                         .push_next(
                             &mut vk::ExternalMemoryImageCreateInfo::default()
-                                .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT),
+                                .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD),
                         ),
                     None,
                 )
@@ -441,7 +437,7 @@ impl WindowHandler for State {
                         .memory_type_index(memory_type_index)
                         .push_next(
                             &mut vk::ExportMemoryAllocateInfo::default()
-                                .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT),
+                                .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD),
                         )
                         .push_next(&mut vk::MemoryDedicatedAllocateInfo::default().image(vk_image)),
                     None,
@@ -451,59 +447,39 @@ impl WindowHandler for State {
 
             unsafe { raw_device.bind_image_memory(vk_image, vk_memory, 0) }.unwrap();
 
-            let subresource_layout = unsafe {
-                raw_device.get_image_subresource_layout(
-                    vk_image,
-                    vk::ImageSubresource::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .mip_level(0)
-                        .array_layer(0),
-                )
-            };
-
             let external_memory_fd =
                 ash::khr::external_memory_fd::Device::new(raw_instance, raw_device);
             let fd_info = ash::vk::MemoryGetFdInfoKHR::default()
                 .memory(vk_memory)
-                .handle_type(ash::vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+                .handle_type(ash::vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
             let fd = unsafe { external_memory_fd.get_memory_fd(&fd_info) }.unwrap();
 
-            let egl_image = EGL
-                .create_image(
-                    self.egl_display,
-                    unsafe { egl::Context::from_ptr(ptr::null_mut()) },
-                    egl::LINUX_DMA_BUF_EXT as u32,
-                    unsafe { egl::ClientBuffer::from_ptr(ptr::null_mut()) },
-                    &[
-                        egl::WIDTH as egl::Attrib,
-                        self.width as egl::Attrib,
-                        egl::HEIGHT as egl::Attrib,
-                        self.height as egl::Attrib,
-                        egl::LINUX_DRM_FOURCC_EXT as egl::Attrib,
-                        0x34325241, // DRM_FORMAT_ARGB8888 = AR24
-                        egl::DMA_BUF_PLANE0_FD_EXT as egl::Attrib,
-                        fd as egl::Attrib,
-                        egl::DMA_BUF_PLANE0_OFFSET_EXT as egl::Attrib,
-                        subresource_layout.offset as egl::Attrib,
-                        egl::DMA_BUF_PLANE0_PITCH_EXT as egl::Attrib,
-                        subresource_layout.row_pitch as egl::Attrib,
-                        egl::ATTRIB_NONE,
-                    ],
-                )
-                .unwrap();
-
             let mut gl_texture = 0;
+            let mut gl_mem_object = 0;
             unsafe {
+                gl_call!(gl::CreateMemoryObjectsEXT(1, &mut gl_mem_object));
+                gl_call!(gl::ImportMemoryFdEXT(
+                    gl_mem_object,
+                    mem_reqs.size,
+                    gl::HANDLE_TYPE_OPAQUE_FD_EXT,
+                    fd
+                ));
+
                 gl_call!(gl::GenTextures(1, &mut gl_texture));
                 gl_call!(gl::BindTexture(gl::TEXTURE_2D, gl_texture));
-                let gl_egl_image_target_texture: unsafe extern "C" fn(u32, *const c_void) =
-                    std::mem::transmute(
-                        EGL.get_proc_address("glEGLImageTargetTexture2DOES")
-                            .unwrap(),
-                    );
-                gl_call!(gl_egl_image_target_texture(
+                gl_call!(gl::TexParameteri(
                     gl::TEXTURE_2D,
-                    egl_image.as_ptr()
+                    gl::TEXTURE_TILING_EXT,
+                    gl::LINEAR_TILING_EXT.try_into().unwrap()
+                ));
+                gl_call!(gl::TextureStorageMem2DEXT(
+                    gl_texture,
+                    1,
+                    gl::RGBA8,
+                    self.width.try_into().unwrap(),
+                    self.height.try_into().unwrap(),
+                    gl_mem_object,
+                    0,
                 ));
 
                 let mut fbo = 0;
@@ -517,7 +493,12 @@ impl WindowHandler for State {
                     0,
                 ));
 
-                gl_call!(gl::Viewport(0, 0, self.width as i32, self.height as i32,));
+                gl_call!(gl::Viewport(
+                    0,
+                    0,
+                    self.width.try_into().unwrap(),
+                    self.height.try_into().unwrap()
+                ));
             }
 
             let hal_texture = unsafe {
@@ -568,8 +549,8 @@ impl WindowHandler for State {
 
             self.shared_texture = Some(SharedTexture {
                 texture,
+                gl_mem_object,
                 gl_texture,
-                egl_image,
             });
 
             self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -768,10 +749,10 @@ fn main() {
     let raw_vk_device = hal_device.raw_device();
 
     let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("F texture"),
+        label: Some("dummy texture"),
         size: wgpu::Extent3d {
-            width: 256,
-            height: 256,
+            width: 1,
+            height: 1,
             depth_or_array_layers: 1,
         },
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
@@ -995,7 +976,6 @@ fn main() {
         bind_group_layout,
         bind_group,
 
-        egl_display,
         shared_texture: None,
         semaphores,
     };

@@ -13,8 +13,12 @@ integrate with wgpu.
 
 When the surface is reconfigured:
 
-1. Allocate an EGL image and import it into a Vulkan texture using DMABUF.
-1. Import the Vulkan texture into OpenGL.
+1. Create a Vulkan RGBA image.
+1. Allocate memory for the image and bind it.
+1. Create an opaque file descriptor that describes the memory.
+1. Create a GL memory object backed by the file descriptor.
+1. Create a GL texture bound to the imported memory.
+1. Create a framebuffer bound to the GL texture.
 
 On render:
 
