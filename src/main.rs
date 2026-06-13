@@ -395,7 +395,7 @@ impl WindowHandler for State {
                 raw_device.create_image(
                     &vk::ImageCreateInfo::default()
                         .image_type(vk::ImageType::TYPE_2D)
-                        .format(vk::Format::B8G8R8A8_UNORM)
+                        .format(vk::Format::R8G8B8A8_UNORM)
                         .extent(vk::Extent3D {
                             width: self.width,
                             height: self.height,
@@ -533,7 +533,7 @@ impl WindowHandler for State {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Bgra8Unorm,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
                         usage: TextureUses::COLOR_TARGET | TextureUses::RESOURCE,
                         memory_flags: wgpu_hal::MemoryFlags::empty(),
                         view_formats: vec![],
@@ -556,7 +556,7 @@ impl WindowHandler for State {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Bgra8Unorm,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                             | wgpu::TextureUsages::TEXTURE_BINDING,
                         view_formats: &[],
