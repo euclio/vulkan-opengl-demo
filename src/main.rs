@@ -741,6 +741,8 @@ fn main() {
     }))
     .expect("Failed to find a suitable adapter");
 
+    let surface_capabilities = surface.get_capabilities(&adapter);
+
     let hal_adapter = unsafe { adapter.as_hal::<Vulkan>().unwrap() };
     let _raw_physical_device = hal_adapter.raw_physical_device();
 
@@ -840,7 +842,7 @@ fn main() {
             module: &shader,
             entry_point: Some("fs"),
             targets: &[Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                format: surface_capabilities.formats[0],
                 blend: Some(wgpu::BlendState::REPLACE),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
