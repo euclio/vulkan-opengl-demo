@@ -402,7 +402,7 @@ impl WindowHandler for State {
                         .mip_levels(1)
                         .array_layers(1)
                         .samples(vk::SampleCountFlags::TYPE_1)
-                        .tiling(vk::ImageTiling::LINEAR)
+                        .tiling(vk::ImageTiling::OPTIMAL)
                         .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE)
                         .push_next(
                             &mut vk::ExternalMemoryImageCreateInfo::default()
@@ -470,7 +470,7 @@ impl WindowHandler for State {
                 gl_call!(gl::TexParameteri(
                     gl::TEXTURE_2D,
                     gl::TEXTURE_TILING_EXT,
-                    gl::LINEAR_TILING_EXT.try_into().unwrap()
+                    gl::OPTIMAL_TILING_EXT.try_into().unwrap()
                 ));
                 gl_call!(gl::TextureStorageMem2DEXT(
                     gl_texture,
