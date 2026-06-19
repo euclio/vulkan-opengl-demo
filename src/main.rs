@@ -259,115 +259,20 @@ impl State {
         frame.present();
         self.queue_render();
     }
-}
 
-impl CompositorHandler for State {
-    fn scale_factor_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _surface: &wayland_client::protocol::wl_surface::WlSurface,
-        _new_factor: i32,
-    ) {
-    }
-
-    fn transform_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _surface: &wayland_client::protocol::wl_surface::WlSurface,
-        _new_transform: wayland_client::protocol::wl_output::Transform,
-    ) {
-    }
-
-    fn frame(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _surface: &wayland_client::protocol::wl_surface::WlSurface,
-        _time: u32,
-    ) {
-    }
-
-    fn surface_enter(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _surface: &wayland_client::protocol::wl_surface::WlSurface,
-        _output: &wayland_client::protocol::wl_output::WlOutput,
-    ) {
-    }
-
-    fn surface_leave(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _surface: &wayland_client::protocol::wl_surface::WlSurface,
-        _output: &wayland_client::protocol::wl_output::WlOutput,
-    ) {
-    }
-}
-
-impl OutputHandler for State {
-    fn output_state(&mut self) -> &mut OutputState {
-        &mut self.output_state
-    }
-
-    fn new_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _output: wayland_client::protocol::wl_output::WlOutput,
-    ) {
-    }
-
-    fn update_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _output: wayland_client::protocol::wl_output::WlOutput,
-    ) {
-    }
-
-    fn output_destroyed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _output: wayland_client::protocol::wl_output::WlOutput,
-    ) {
-    }
-}
-
-impl WindowHandler for State {
-    fn request_close(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _window: &Window,
-    ) {
-        self.exit = true;
-    }
-
-    fn configure(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _window: &Window,
-        configure: smithay_client_toolkit::shell::xdg::window::WindowConfigure,
-        _serial: u32,
-    ) {
+    fn resize(&mut self, new_size: (Option<u32>, Option<u32>)) {
         let is_initial_configure = !self.configured;
 
-        let (new_width, new_height) = configure.new_size;
-        self.width = new_width.map_or(256, |v| v.get());
-        self.height = new_height.map_or(256, |v| v.get());
+        let (new_width, new_height) = new_size;
+        self.width = new_width.unwrap_or(256);
+        self.height = new_height.unwrap_or(256);
 
         let instance = &self.instance;
         let adapter = &self.adapter;
         let surface = &self.surface;
         let device = &self.device;
 
-        if self.shared_texture.is_none() || matches!(configure.new_size, (Some(_), Some(_))) {
+        if self.shared_texture.is_none() || matches!(new_size, (Some(_), Some(_))) {
             // Wait for rendering to finish.
             device.poll(PollType::wait_indefinitely()).unwrap();
 
@@ -588,6 +493,109 @@ impl WindowHandler for State {
         if is_initial_configure {
             self.queue_render();
         }
+    }
+}
+
+impl CompositorHandler for State {
+    fn scale_factor_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &wayland_client::QueueHandle<Self>,
+        _surface: &wayland_client::protocol::wl_surface::WlSurface,
+        _new_factor: i32,
+    ) {
+    }
+
+    fn transform_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &wayland_client::QueueHandle<Self>,
+        _surface: &wayland_client::protocol::wl_surface::WlSurface,
+        _new_transform: wayland_client::protocol::wl_output::Transform,
+    ) {
+    }
+
+    fn frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &wayland_client::QueueHandle<Self>,
+        _surface: &wayland_client::protocol::wl_surface::WlSurface,
+        _time: u32,
+    ) {
+    }
+
+    fn surface_enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &wayland_client::QueueHandle<Self>,
+        _surface: &wayland_client::protocol::wl_surface::WlSurface,
+        _output: &wayland_client::protocol::wl_output::WlOutput,
+    ) {
+    }
+
+    fn surface_leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &wayland_client::QueueHandle<Self>,
+        _surface: &wayland_client::protocol::wl_surface::WlSurface,
+        _output: &wayland_client::protocol::wl_output::WlOutput,
+    ) {
+    }
+}
+
+impl OutputHandler for State {
+    fn output_state(&mut self) -> &mut OutputState {
+        &mut self.output_state
+    }
+
+    fn new_output(
+        &mut self,
+        _conn: &Connection,
+        _qh: &wayland_client::QueueHandle<Self>,
+        _output: wayland_client::protocol::wl_output::WlOutput,
+    ) {
+    }
+
+    fn update_output(
+        &mut self,
+        _conn: &Connection,
+        _qh: &wayland_client::QueueHandle<Self>,
+        _output: wayland_client::protocol::wl_output::WlOutput,
+    ) {
+    }
+
+    fn output_destroyed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &wayland_client::QueueHandle<Self>,
+        _output: wayland_client::protocol::wl_output::WlOutput,
+    ) {
+    }
+}
+
+impl WindowHandler for State {
+    fn request_close(
+        &mut self,
+        _conn: &Connection,
+        _qh: &wayland_client::QueueHandle<Self>,
+        _window: &Window,
+    ) {
+        self.exit = true;
+    }
+
+    fn configure(
+        &mut self,
+        _conn: &Connection,
+        _qh: &wayland_client::QueueHandle<Self>,
+        _window: &Window,
+        configure: smithay_client_toolkit::shell::xdg::window::WindowConfigure,
+        _serial: u32,
+    ) {
+        let new_size = (
+            configure.new_size.0.map(|v| v.get()),
+            configure.new_size.1.map(|v| v.get()),
+        );
+        self.resize(new_size);
     }
 }
 
