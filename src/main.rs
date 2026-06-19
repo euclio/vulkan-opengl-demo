@@ -1,31 +1,19 @@
-use std::ptr::NonNull;
-use std::time::Duration;
 use std::{iter, ptr};
 
 use ash::vk;
 use gl::types::GLuint;
-use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
-use smithay_client_toolkit::output::{OutputHandler, OutputState};
-use smithay_client_toolkit::reexports::calloop::{EventLoop, LoopHandle};
-use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
-use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
-use smithay_client_toolkit::reexports::client::{Connection, Proxy};
-use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
-use smithay_client_toolkit::seat::{SeatHandler, SeatState};
-use smithay_client_toolkit::shell::WaylandSurface;
-use smithay_client_toolkit::shell::xdg::XdgShell;
-use smithay_client_toolkit::shell::xdg::window::{Window, WindowHandler};
-use smithay_client_toolkit::{
-    delegate_compositor, delegate_output, delegate_registry, delegate_seat, delegate_xdg_shell,
-    delegate_xdg_window, registry_handlers,
-};
 use wgpu::hal::api::Vulkan;
-use wgpu::rwh::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
+use wgpu::rwh::RawDisplayHandle;
 use wgpu::{
     BackendOptions, CurrentSurfaceTexture, InstanceFlags, MemoryBudgetThresholds, PollType,
     TextureUses,
 };
 use wgpu_hal::vulkan::{Instance, TextureMemory};
+use winit::application::ApplicationHandler;
+use winit::event::WindowEvent;
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use winit::window::{Window, WindowAttributes};
 
 pub static EGL: egl::Instance<egl::Static> = egl::Instance::new(egl::Static);
 
@@ -98,16 +86,10 @@ struct Semaphores {
 }
 
 struct State {
-    loop_handle: LoopHandle<'static, Self>,
-    registry_state: RegistryState,
-    seat_state: SeatState,
-    output_state: OutputState,
     configured: bool,
 
-    exit: bool,
     width: u32,
     height: u32,
-    window: Window,
 
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
@@ -121,34 +103,12 @@ struct State {
 
     shared_texture: Option<SharedTexture>,
     semaphores: Semaphores,
+
+    window: Window, // Must be dropped last
 }
 
 impl State {
-    async fn new(event_loop: &mut EventLoop<'static, Self>) -> Self {
-        let conn = Connection::connect_to_env().unwrap();
-        let (globals, event_queue) = registry_queue_init(&conn).unwrap();
-        let qh = event_queue.handle();
-        let loop_handle = event_loop.handle();
-        WaylandSource::new(conn.clone(), event_queue)
-            .insert(loop_handle)
-            .unwrap();
-
-        let compositor_state =
-            CompositorState::bind(&globals, &qh).expect("xdg shell not available");
-        let xdg_shell_state = XdgShell::bind(&globals, &qh).expect("xdg shell not available");
-
-        let surface = compositor_state.create_surface(&qh);
-        let window = xdg_shell_state.create_window(
-            surface,
-            smithay_client_toolkit::shell::xdg::window::WindowDecorations::ServerDefault,
-            &qh,
-        );
-        window.set_title("Vulkan OpenGL Demo");
-
-        window.set_app_id("io.github.euclio.vulkan-opengl-demo.Demo");
-        window.set_min_size(Some((256, 256)));
-        window.commit();
-
+    async fn new(window: Window) -> Self {
         let hal_instance = unsafe {
             Instance::init_with_callback(
                 &wgpu_hal::InstanceDescriptor {
@@ -173,12 +133,9 @@ impl State {
         let hal_instance = unsafe { instance.as_hal::<Vulkan>() }.unwrap();
         let raw_vk_instance = hal_instance.shared_instance().raw_instance();
 
-        let raw_display_handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-            NonNull::new(conn.backend().display_id().as_ptr().cast()).unwrap(),
-        ));
-        let raw_window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(
-            NonNull::new(window.wl_surface().id().as_ptr().cast()).unwrap(),
-        ));
+        let raw_display_handle = window.display_handle().unwrap().as_raw();
+
+        let raw_window_handle = window.window_handle().unwrap().as_raw();
 
         let surface = unsafe {
             instance
@@ -312,7 +269,13 @@ impl State {
             cache: None,
         });
 
-        let egl_display = unsafe { EGL.get_display(conn.backend().display_ptr().cast()) }.unwrap();
+        let display_ptr = match raw_display_handle {
+            RawDisplayHandle::Wayland(wayland) => wayland.display.as_ptr(),
+            RawDisplayHandle::Xlib(xlib) => xlib.display.as_ref().unwrap().as_ptr(),
+            _ => unimplemented!(),
+        };
+
+        let egl_display = unsafe { EGL.get_display(display_ptr) }.unwrap();
         EGL.initialize(egl_display).unwrap();
         EGL.bind_api(egl::OPENGL_API).unwrap();
 
@@ -433,13 +396,8 @@ impl State {
         };
 
         State {
-            loop_handle: event_loop.handle(),
-            registry_state: RegistryState::new(&globals),
-            seat_state: SeatState::new(&globals, &qh),
-            output_state: OutputState::new(&globals, &qh),
             configured: false,
 
-            exit: false,
             width: 256,
             height: 256,
             window,
@@ -456,16 +414,6 @@ impl State {
             shared_texture: None,
             semaphores,
         }
-    }
-
-    fn queue_render(&self) {
-        if !self.configured {
-            return;
-        }
-
-        self.loop_handle.insert_idle(|state| {
-            state.render();
-        });
     }
 
     fn render(&self) {
@@ -591,12 +539,9 @@ impl State {
         }
 
         frame.present();
-        self.queue_render();
     }
 
     fn resize(&mut self, new_size: (Option<u32>, Option<u32>)) {
-        let is_initial_configure = !self.configured;
-
         let (new_width, new_height) = new_size;
         self.width = new_width.unwrap_or(256);
         self.height = new_height.unwrap_or(256);
@@ -823,192 +768,58 @@ impl State {
         surface.configure(&self.device, &surface_config);
 
         self.configured = true;
+    }
+}
 
-        if is_initial_configure {
-            self.queue_render();
+#[derive(Default)]
+struct App {
+    state: Option<State>,
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if self.state.is_none() {
+            let attrs = WindowAttributes::default().with_title("Vulkan OpenGL Demo");
+            let window = event_loop.create_window(attrs).unwrap();
+
+            let state = pollster::block_on(State::new(window));
+            self.state = Some(state);
         }
     }
-}
 
-impl CompositorHandler for State {
-    fn scale_factor_changed(
+    fn window_event(
         &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _surface: &wayland_client::protocol::wl_surface::WlSurface,
-        _new_factor: i32,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        event: WindowEvent,
     ) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+
+        match event {
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
+            WindowEvent::Resized(physical_size) => {
+                state.resize((Some(physical_size.width), Some(physical_size.height)));
+                state.window.request_redraw();
+            }
+            WindowEvent::RedrawRequested => {
+                state.render();
+                state.window.request_redraw();
+            }
+            _ => (),
+        }
     }
-
-    fn transform_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _surface: &wayland_client::protocol::wl_surface::WlSurface,
-        _new_transform: wayland_client::protocol::wl_output::Transform,
-    ) {
-    }
-
-    fn frame(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _surface: &wayland_client::protocol::wl_surface::WlSurface,
-        _time: u32,
-    ) {
-    }
-
-    fn surface_enter(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _surface: &wayland_client::protocol::wl_surface::WlSurface,
-        _output: &wayland_client::protocol::wl_output::WlOutput,
-    ) {
-    }
-
-    fn surface_leave(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _surface: &wayland_client::protocol::wl_surface::WlSurface,
-        _output: &wayland_client::protocol::wl_output::WlOutput,
-    ) {
-    }
-}
-
-impl OutputHandler for State {
-    fn output_state(&mut self) -> &mut OutputState {
-        &mut self.output_state
-    }
-
-    fn new_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _output: wayland_client::protocol::wl_output::WlOutput,
-    ) {
-    }
-
-    fn update_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _output: wayland_client::protocol::wl_output::WlOutput,
-    ) {
-    }
-
-    fn output_destroyed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _output: wayland_client::protocol::wl_output::WlOutput,
-    ) {
-    }
-}
-
-impl WindowHandler for State {
-    fn request_close(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _window: &Window,
-    ) {
-        self.exit = true;
-    }
-
-    fn configure(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _window: &Window,
-        configure: smithay_client_toolkit::shell::xdg::window::WindowConfigure,
-        _serial: u32,
-    ) {
-        let new_size = (
-            configure.new_size.0.map(|v| v.get()),
-            configure.new_size.1.map(|v| v.get()),
-        );
-        self.resize(new_size);
-    }
-}
-
-impl SeatHandler for State {
-    fn seat_state(&mut self) -> &mut SeatState {
-        &mut self.seat_state
-    }
-
-    fn new_seat(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _seat: wayland_client::protocol::wl_seat::WlSeat,
-    ) {
-    }
-
-    fn new_capability(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _seat: wayland_client::protocol::wl_seat::WlSeat,
-        _capability: smithay_client_toolkit::seat::Capability,
-    ) {
-    }
-
-    fn remove_capability(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _seat: wayland_client::protocol::wl_seat::WlSeat,
-        _capability: smithay_client_toolkit::seat::Capability,
-    ) {
-    }
-
-    fn remove_seat(
-        &mut self,
-        _conn: &Connection,
-        _qh: &wayland_client::QueueHandle<Self>,
-        _seat: wayland_client::protocol::wl_seat::WlSeat,
-    ) {
-    }
-}
-
-delegate_compositor!(State);
-delegate_output!(State);
-
-delegate_seat!(State);
-
-delegate_xdg_shell!(State);
-delegate_xdg_window!(State);
-
-delegate_registry!(State);
-
-impl ProvidesRegistryState for State {
-    fn registry(&mut self) -> &mut RegistryState {
-        &mut self.registry_state
-    }
-    registry_handlers![OutputState];
 }
 
 fn main() {
     env_logger::init();
 
-    let mut event_loop: EventLoop<State> =
-        EventLoop::try_new().expect("failed to initialize event loop");
+    let event_loop = EventLoop::new().unwrap();
+    event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut state = pollster::block_on(State::new(&mut event_loop));
-
-    loop {
-        event_loop
-            .dispatch(Duration::from_millis(16), &mut state)
-            .unwrap();
-
-        if state.exit {
-            println!("exiting");
-            break;
-        }
-    }
-
-    drop(state.surface);
-    drop(state.window);
+    let mut app = App::default();
+    event_loop.run_app(&mut app).unwrap();
 }

@@ -8,11 +8,9 @@ ash = "0.38.0"
 egl = { version = "0.7.1", package = "r-egl", features = ["static"] }
 env_logger = "0.11.10"
 pollster = "0.4.0"
-raw-window-handle = "0.6.2"
-smithay-client-toolkit = "0.20.0"
-wayland-client = { version = "0.31.14", features = ["system"] }
 wgpu = "29.0.3"
 wgpu-hal = { version = "29.0.3", features = ["vulkan"] }
+winit = "0.30.13"
 
 [build-dependencies]
 gl_generator = "0.14.0"
