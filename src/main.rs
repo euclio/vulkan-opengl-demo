@@ -124,6 +124,340 @@ struct State {
 }
 
 impl State {
+    async fn new(event_loop: &mut EventLoop<'static, Self>) -> Self {
+        let conn = Connection::connect_to_env().unwrap();
+        let (globals, event_queue) = registry_queue_init(&conn).unwrap();
+        let qh = event_queue.handle();
+        let loop_handle = event_loop.handle();
+        WaylandSource::new(conn.clone(), event_queue)
+            .insert(loop_handle)
+            .unwrap();
+
+        let compositor_state =
+            CompositorState::bind(&globals, &qh).expect("xdg shell not available");
+        let xdg_shell_state = XdgShell::bind(&globals, &qh).expect("xdg shell not available");
+
+        let surface = compositor_state.create_surface(&qh);
+        let window = xdg_shell_state.create_window(
+            surface,
+            smithay_client_toolkit::shell::xdg::window::WindowDecorations::ServerDefault,
+            &qh,
+        );
+        window.set_title("Vulkan OpenGL Demo");
+
+        window.set_app_id("io.github.euclio.vulkan-opengl-demo.Demo");
+        window.set_min_size(Some((256, 256)));
+        window.commit();
+
+        let hal_instance = unsafe {
+            Instance::init_with_callback(
+                &wgpu_hal::InstanceDescriptor {
+                    name: "wgpu",
+                    flags: InstanceFlags::VALIDATION,
+                    memory_budget_thresholds: MemoryBudgetThresholds::default(),
+                    backend_options: BackendOptions::from_env_or_default(),
+                    telemetry: None,
+                    display: None,
+                },
+                Some(Box::new(|args| {
+                    args.extensions.extend_from_slice(&[
+                        vk::KHR_EXTERNAL_MEMORY_CAPABILITIES_NAME,
+                        vk::KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_NAME,
+                    ])
+                })),
+            )
+            .unwrap()
+        };
+        let instance = unsafe { wgpu::Instance::from_hal::<Vulkan>(hal_instance) };
+
+        let hal_instance = unsafe { instance.as_hal::<Vulkan>() }.unwrap();
+        let raw_vk_instance = hal_instance.shared_instance().raw_instance();
+
+        let raw_display_handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+            NonNull::new(conn.backend().display_id().as_ptr().cast()).unwrap(),
+        ));
+        let raw_window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(
+            NonNull::new(window.wl_surface().id().as_ptr().cast()).unwrap(),
+        ));
+
+        let surface = unsafe {
+            instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle: Some(raw_display_handle),
+                    raw_window_handle,
+                })
+                .unwrap()
+        };
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            })
+            .await
+            .expect("Failed to find a suitable adapter");
+
+        let surface_capabilities = surface.get_capabilities(&adapter);
+
+        let hal_adapter = unsafe { adapter.as_hal::<Vulkan>().unwrap() };
+        let _raw_physical_device = hal_adapter.raw_physical_device();
+
+        let open_device = unsafe {
+            hal_adapter.open_with_callback(
+                wgpu::Features::default(),
+                &wgpu::Limits::default(),
+                &wgpu::MemoryHints::default(),
+                Some(Box::new(|args| {
+                    args.extensions
+                        .extend_from_slice(&[vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME]);
+                })),
+            )
+        }
+        .unwrap();
+
+        let (device, queue) = unsafe {
+            adapter
+                .create_device_from_hal::<Vulkan>(open_device, &wgpu::DeviceDescriptor::default())
+        }
+        .expect("Failed to request device");
+
+        let hal_device = unsafe { device.as_hal::<Vulkan>().unwrap() };
+        let raw_vk_device = hal_device.raw_device();
+
+        let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dummy texture"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: &[],
+        });
+
+        let dummy_texture_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&dummy_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let shader = device.create_shader_module(wgpu::include_wgsl!("../shader.wgsl"));
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Render Pipeline Layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_capabilities.formats[0],
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let egl_display = unsafe { EGL.get_display(conn.backend().display_ptr().cast()) }.unwrap();
+        EGL.initialize(egl_display).unwrap();
+        EGL.bind_api(egl::OPENGL_API).unwrap();
+
+        let egl_config = EGL
+            .choose_first_config(
+                egl_display,
+                &[
+                    egl::SURFACE_TYPE,
+                    egl::PBUFFER_BIT,
+                    egl::RED_SIZE,
+                    8,
+                    egl::GREEN_SIZE,
+                    8,
+                    egl::BLUE_SIZE,
+                    8,
+                    egl::DEPTH_SIZE,
+                    24,
+                    egl::RENDERABLE_TYPE,
+                    egl::OPENGL_BIT,
+                    egl::NONE,
+                ],
+            )
+            .unwrap()
+            .unwrap();
+
+        let ctx = EGL
+            .create_context(
+                egl_display,
+                egl_config,
+                None,
+                &[
+                    egl::CONTEXT_MAJOR_VERSION,
+                    4,
+                    egl::CONTEXT_MINOR_VERSION,
+                    6,
+                    egl::CONTEXT_OPENGL_PROFILE_MASK,
+                    egl::CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
+                    egl::NONE,
+                ],
+            )
+            .unwrap();
+
+        EGL.make_current(egl_display, None, None, Some(ctx))
+            .unwrap();
+
+        gl::load_with(|symbol| EGL.get_proc_address(symbol).unwrap() as *const _);
+        let mut export_sem_info = vk::ExportSemaphoreCreateInfo::default()
+            .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
+        let sem_info = vk::SemaphoreCreateInfo::default().push_next(&mut export_sem_info);
+        let gl_write_finished = unsafe { raw_vk_device.create_semaphore(&sem_info, None) }.unwrap();
+        let vk_read_finished = unsafe { raw_vk_device.create_semaphore(&sem_info, None) }.unwrap();
+
+        let ext_sem_fn =
+            ash::khr::external_semaphore_fd::Device::new(raw_vk_instance, raw_vk_device);
+        let gl_write_finished_fd = unsafe {
+            ext_sem_fn
+                .get_semaphore_fd(
+                    &vk::SemaphoreGetFdInfoKHR::default()
+                        .semaphore(gl_write_finished)
+                        .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD),
+                )
+                .unwrap()
+        };
+        let vk_read_finished_fd = unsafe {
+            ext_sem_fn
+                .get_semaphore_fd(
+                    &vk::SemaphoreGetFdInfoKHR::default()
+                        .semaphore(vk_read_finished)
+                        .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD),
+                )
+                .unwrap()
+        };
+
+        // Import the semaphores into GL.
+        let mut gl_gl_write_finished = 0;
+        let mut gl_vk_read_finished = 0;
+        unsafe {
+            gl_call!(gl::GenSemaphoresEXT(1, &mut gl_gl_write_finished));
+            gl_call!(gl::ImportSemaphoreFdEXT(
+                gl_gl_write_finished,
+                gl::HANDLE_TYPE_OPAQUE_FD_EXT,
+                gl_write_finished_fd,
+            ));
+            gl_call!(gl::GenSemaphoresEXT(1, &mut gl_vk_read_finished));
+            gl_call!(gl::ImportSemaphoreFdEXT(
+                gl_vk_read_finished,
+                gl::HANDLE_TYPE_OPAQUE_FD_EXT,
+                vk_read_finished_fd,
+            ));
+        }
+
+        let hal_queue = unsafe { queue.as_hal::<Vulkan>() }.unwrap();
+        let raw_queue = hal_queue.as_raw();
+
+        // Pre-signal so GL can proceed on frame 0
+        unsafe {
+            raw_vk_device
+                .queue_submit(
+                    raw_queue,
+                    &[vk::SubmitInfo::default().signal_semaphores(&[vk_read_finished])],
+                    vk::Fence::null(),
+                )
+                .unwrap();
+        }
+
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+
+        let semaphores = Semaphores {
+            gl_write_finished,
+            gl_gl_write_finished,
+            vk_read_finished,
+            gl_vk_read_finished,
+        };
+
+        State {
+            loop_handle: event_loop.handle(),
+            registry_state: RegistryState::new(&globals),
+            seat_state: SeatState::new(&globals, &qh),
+            output_state: OutputState::new(&globals, &qh),
+            configured: false,
+
+            exit: false,
+            width: 256,
+            height: 256,
+            window,
+            instance,
+            device,
+            surface,
+            adapter,
+            queue,
+            render_pipeline,
+            sampler,
+            bind_group_layout,
+            bind_group,
+
+            shared_texture: None,
+            semaphores,
+        }
+    }
+
     fn queue_render(&self) {
         if !self.configured {
             return;
@@ -659,334 +993,10 @@ impl ProvidesRegistryState for State {
 fn main() {
     env_logger::init();
 
-    let conn = Connection::connect_to_env().unwrap();
-    let (globals, event_queue) = registry_queue_init(&conn).unwrap();
-    let qh = event_queue.handle();
     let mut event_loop: EventLoop<State> =
         EventLoop::try_new().expect("failed to initialize event loop");
-    let loop_handle = event_loop.handle();
-    WaylandSource::new(conn.clone(), event_queue)
-        .insert(loop_handle)
-        .unwrap();
 
-    let compositor_state = CompositorState::bind(&globals, &qh).expect("xdg shell not available");
-    let xdg_shell_state = XdgShell::bind(&globals, &qh).expect("xdg shell not available");
-
-    let surface = compositor_state.create_surface(&qh);
-    let window = xdg_shell_state.create_window(
-        surface,
-        smithay_client_toolkit::shell::xdg::window::WindowDecorations::ServerDefault,
-        &qh,
-    );
-    window.set_title("Vulkan OpenGL Demo");
-
-    window.set_app_id("io.github.euclio.vulkan-opengl-demo.Demo");
-    window.set_min_size(Some((256, 256)));
-    window.commit();
-
-    let hal_instance = unsafe {
-        Instance::init_with_callback(
-            &wgpu_hal::InstanceDescriptor {
-                name: "wgpu",
-                flags: InstanceFlags::VALIDATION,
-                memory_budget_thresholds: MemoryBudgetThresholds::default(),
-                backend_options: BackendOptions::from_env_or_default(),
-                telemetry: None,
-                display: None,
-            },
-            Some(Box::new(|args| {
-                args.extensions.extend_from_slice(&[
-                    vk::KHR_EXTERNAL_MEMORY_CAPABILITIES_NAME,
-                    vk::KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_NAME,
-                ])
-            })),
-        )
-        .unwrap()
-    };
-    let instance = unsafe { wgpu::Instance::from_hal::<Vulkan>(hal_instance) };
-
-    let hal_instance = unsafe { instance.as_hal::<Vulkan>() }.unwrap();
-    let raw_vk_instance = hal_instance.shared_instance().raw_instance();
-
-    let raw_display_handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-        NonNull::new(conn.backend().display_id().as_ptr().cast()).unwrap(),
-    ));
-    let raw_window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(
-        NonNull::new(window.wl_surface().id().as_ptr().cast()).unwrap(),
-    ));
-
-    let surface = unsafe {
-        instance
-            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: Some(raw_display_handle),
-                raw_window_handle,
-            })
-            .unwrap()
-    };
-
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        compatible_surface: Some(&surface),
-        ..Default::default()
-    }))
-    .expect("Failed to find a suitable adapter");
-
-    let surface_capabilities = surface.get_capabilities(&adapter);
-
-    let hal_adapter = unsafe { adapter.as_hal::<Vulkan>().unwrap() };
-    let _raw_physical_device = hal_adapter.raw_physical_device();
-
-    let open_device = unsafe {
-        hal_adapter.open_with_callback(
-            wgpu::Features::default(),
-            &wgpu::Limits::default(),
-            &wgpu::MemoryHints::default(),
-            Some(Box::new(|args| {
-                args.extensions
-                    .extend_from_slice(&[vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME]);
-            })),
-        )
-    }
-    .unwrap();
-
-    let (device, queue) = unsafe {
-        adapter.create_device_from_hal::<Vulkan>(open_device, &wgpu::DeviceDescriptor::default())
-    }
-    .expect("Failed to request device");
-
-    let hal_device = unsafe { device.as_hal::<Vulkan>().unwrap() };
-    let raw_vk_device = hal_device.raw_device();
-
-    let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("dummy texture"),
-        size: wgpu::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        mip_level_count: 1,
-        sample_count: 1,
-        view_formats: &[],
-    });
-
-    let dummy_texture_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
-
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Bind Group Layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&dummy_texture_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&sampler),
-            },
-        ],
-    });
-
-    let shader = device.create_shader_module(wgpu::include_wgsl!("../shader.wgsl"));
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Render Pipeline Layout"),
-        bind_group_layouts: &[Some(&bind_group_layout)],
-        immediate_size: 0,
-    });
-
-    let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Render Pipeline"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs"),
-            buffers: &[],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_capabilities.formats[0],
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    });
-
-    let egl_display = unsafe { EGL.get_display(conn.backend().display_ptr().cast()) }.unwrap();
-    EGL.initialize(egl_display).unwrap();
-    EGL.bind_api(egl::OPENGL_API).unwrap();
-
-    let egl_config = EGL
-        .choose_first_config(
-            egl_display,
-            &[
-                egl::SURFACE_TYPE,
-                egl::PBUFFER_BIT,
-                egl::RED_SIZE,
-                8,
-                egl::GREEN_SIZE,
-                8,
-                egl::BLUE_SIZE,
-                8,
-                egl::DEPTH_SIZE,
-                24,
-                egl::RENDERABLE_TYPE,
-                egl::OPENGL_BIT,
-                egl::NONE,
-            ],
-        )
-        .unwrap()
-        .unwrap();
-
-    let ctx = EGL
-        .create_context(
-            egl_display,
-            egl_config,
-            None,
-            &[
-                egl::CONTEXT_MAJOR_VERSION,
-                4,
-                egl::CONTEXT_MINOR_VERSION,
-                6,
-                egl::CONTEXT_OPENGL_PROFILE_MASK,
-                egl::CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT,
-                egl::NONE,
-            ],
-        )
-        .unwrap();
-
-    EGL.make_current(egl_display, None, None, Some(ctx))
-        .unwrap();
-
-    gl::load_with(|symbol| EGL.get_proc_address(symbol).unwrap() as *const _);
-    let mut export_sem_info = vk::ExportSemaphoreCreateInfo::default()
-        .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
-    let sem_info = vk::SemaphoreCreateInfo::default().push_next(&mut export_sem_info);
-    let gl_write_finished = unsafe { raw_vk_device.create_semaphore(&sem_info, None) }.unwrap();
-    let vk_read_finished = unsafe { raw_vk_device.create_semaphore(&sem_info, None) }.unwrap();
-
-    let ext_sem_fn = ash::khr::external_semaphore_fd::Device::new(raw_vk_instance, raw_vk_device);
-    let gl_write_finished_fd = unsafe {
-        ext_sem_fn
-            .get_semaphore_fd(
-                &vk::SemaphoreGetFdInfoKHR::default()
-                    .semaphore(gl_write_finished)
-                    .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD),
-            )
-            .unwrap()
-    };
-    let vk_read_finished_fd = unsafe {
-        ext_sem_fn
-            .get_semaphore_fd(
-                &vk::SemaphoreGetFdInfoKHR::default()
-                    .semaphore(vk_read_finished)
-                    .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD),
-            )
-            .unwrap()
-    };
-
-    // Import the semaphores into GL.
-    let mut gl_gl_write_finished = 0;
-    let mut gl_vk_read_finished = 0;
-    unsafe {
-        gl_call!(gl::GenSemaphoresEXT(1, &mut gl_gl_write_finished));
-        gl_call!(gl::ImportSemaphoreFdEXT(
-            gl_gl_write_finished,
-            gl::HANDLE_TYPE_OPAQUE_FD_EXT,
-            gl_write_finished_fd,
-        ));
-        gl_call!(gl::GenSemaphoresEXT(1, &mut gl_vk_read_finished));
-        gl_call!(gl::ImportSemaphoreFdEXT(
-            gl_vk_read_finished,
-            gl::HANDLE_TYPE_OPAQUE_FD_EXT,
-            vk_read_finished_fd,
-        ));
-    }
-
-    let hal_queue = unsafe { queue.as_hal::<Vulkan>() }.unwrap();
-    let raw_queue = hal_queue.as_raw();
-
-    // Pre-signal so GL can proceed on frame 0
-    unsafe {
-        raw_vk_device
-            .queue_submit(
-                raw_queue,
-                &[vk::SubmitInfo::default().signal_semaphores(&[vk_read_finished])],
-                vk::Fence::null(),
-            )
-            .unwrap();
-    }
-
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        })
-        .unwrap();
-
-    let semaphores = Semaphores {
-        gl_write_finished,
-        gl_gl_write_finished,
-        vk_read_finished,
-        gl_vk_read_finished,
-    };
-
-    let mut state = State {
-        loop_handle: event_loop.handle(),
-        registry_state: RegistryState::new(&globals),
-        seat_state: SeatState::new(&globals, &qh),
-        output_state: OutputState::new(&globals, &qh),
-        configured: false,
-
-        exit: false,
-        width: 256,
-        height: 256,
-        window,
-        instance,
-        device,
-        surface,
-        adapter,
-        queue,
-        render_pipeline,
-        sampler,
-        bind_group_layout,
-        bind_group,
-
-        shared_texture: None,
-        semaphores,
-    };
+    let mut state = pollster::block_on(State::new(&mut event_loop));
 
     loop {
         event_loop
