@@ -642,6 +642,13 @@ impl State {
             let mut gl_mem_object = 0;
             unsafe {
                 gl_call!(gl::CreateMemoryObjectsEXT(1, &mut gl_mem_object));
+
+                let dedicated = gl::TRUE.into();
+                gl_call!(gl::MemoryObjectParameterivEXT(
+                    gl_mem_object,
+                    gl::DEDICATED_MEMORY_OBJECT_EXT,
+                    &dedicated
+                ));
                 gl_call!(gl::ImportMemoryFdEXT(
                     gl_mem_object,
                     mem_reqs.size,
