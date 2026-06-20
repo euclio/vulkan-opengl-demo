@@ -10,7 +10,7 @@ fn main() {
 
     Registry::new(
         Api::Gl,
-        (3, 0),
+        (4, 6),
         Profile::Compatibility,
         Fallbacks::All,
         [
