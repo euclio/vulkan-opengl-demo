@@ -8,7 +8,7 @@ ash = "0.38.0"
 egl = { version = "0.7.1", package = "r-egl", features = ["static"] }
 env_logger = "0.11.10"
 pollster = "0.4.0"
-wgpu = "29.0.3"
+wgpu = "30.0.0"
 winit = "0.30.13"
 
 [build-dependencies]

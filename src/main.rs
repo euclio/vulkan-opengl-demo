@@ -537,7 +537,7 @@ impl State {
                 .unwrap();
         }
 
-        frame.present();
+        queue.present(frame);
     }
 
     fn resize(&mut self, new_size: (Option<u32>, Option<u32>)) {
@@ -732,6 +732,7 @@ impl State {
                             | wgpu::TextureUsages::TEXTURE_BINDING,
                         view_formats: &[],
                     },
+                    wgpu::TextureUses::UNINITIALIZED,
                 )
             };
 
@@ -769,6 +770,7 @@ impl State {
             height: self.height,
             desired_maximum_frame_latency: 2,
             present_mode: wgpu::PresentMode::Fifo,
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
 
         surface.configure(&self.device, &surface_config);
