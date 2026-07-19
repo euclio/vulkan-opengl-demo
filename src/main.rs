@@ -5,8 +5,7 @@ use gl::types::GLuint;
 use wgpu::hal::api::Vulkan;
 use wgpu::rwh::RawDisplayHandle;
 use wgpu::{
-    BackendOptions, CurrentSurfaceTexture, InstanceFlags, MemoryBudgetThresholds, PollType,
-    TextureUses, hal,
+    BackendOptions, CurrentSurfaceTexture, InstanceFlags, MemoryBudgetThresholds, TextureUses, hal,
 };
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -367,25 +366,10 @@ impl State {
         }
 
         let hal_queue = unsafe { queue.as_hal::<Vulkan>() }.unwrap();
-        let raw_queue = hal_queue.as_raw();
 
-        // Pre-signal so GL can proceed on frame 0
-        unsafe {
-            raw_vk_device
-                .queue_submit(
-                    raw_queue,
-                    &[vk::SubmitInfo::default().signal_semaphores(&[vk_read_finished])],
-                    vk::Fence::null(),
-                )
-                .unwrap();
-        }
-
-        device
-            .poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            })
-            .unwrap();
+        // Pre-signal so GL can proceed on the first frame.
+        hal_queue.add_signal_semaphore(vk_read_finished, None);
+        queue.submit(iter::empty());
 
         let semaphores = Semaphores {
             gl_write_finished,
@@ -459,8 +443,6 @@ impl State {
         }
 
         let device = &self.device;
-        let hal_device = unsafe { device.as_hal::<Vulkan>() }.unwrap();
-        let raw_device = hal_device.raw_device();
 
         let surface = &self.surface;
 
@@ -474,18 +456,12 @@ impl State {
 
         let queue = &self.queue;
         let hal_queue = unsafe { queue.as_hal::<Vulkan>() }.unwrap();
-        let raw_queue = hal_queue.as_raw();
 
-        unsafe {
-            raw_device.queue_submit(
-                raw_queue,
-                &[vk::SubmitInfo::default()
-                    .wait_semaphores(&[self.semaphores.gl_write_finished])
-                    .wait_dst_stage_mask(&[vk::PipelineStageFlags::FRAGMENT_SHADER])],
-                vk::Fence::null(),
-            )
-        }
-        .unwrap();
+        hal_queue.add_wait_semaphore(
+            self.semaphores.gl_write_finished,
+            None,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+        );
 
         let mut encoder =
             device.create_command_encoder(&wgpu::wgt::CommandEncoderDescriptor::default());
@@ -517,25 +493,9 @@ impl State {
 
         let command_buffer = encoder.finish();
 
-        let submission = queue.submit(iter::once(command_buffer));
+        hal_queue.add_signal_semaphore(self.semaphores.vk_read_finished, None);
 
-        device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
-            })
-            .unwrap();
-
-        unsafe {
-            raw_device
-                .queue_submit(
-                    raw_queue,
-                    &[vk::SubmitInfo::default()
-                        .signal_semaphores(&[self.semaphores.vk_read_finished])],
-                    vk::Fence::null(),
-                )
-                .unwrap();
-        }
+        queue.submit(iter::once(command_buffer));
 
         queue.present(frame);
     }
@@ -551,9 +511,6 @@ impl State {
         let device = &self.device;
 
         if self.shared_texture.is_none() || matches!(new_size, (Some(_), Some(_))) {
-            // Wait for rendering to finish.
-            device.poll(PollType::wait_indefinitely()).unwrap();
-
             if let Some(old) = self.shared_texture.take() {
                 unsafe {
                     gl_call!(gl::DeleteTextures(1, &old.gl_texture));
