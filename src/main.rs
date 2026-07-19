@@ -6,9 +6,8 @@ use wgpu::hal::api::Vulkan;
 use wgpu::rwh::RawDisplayHandle;
 use wgpu::{
     BackendOptions, CurrentSurfaceTexture, InstanceFlags, MemoryBudgetThresholds, PollType,
-    TextureUses,
+    TextureUses, hal,
 };
-use wgpu_hal::vulkan::{Instance, TextureMemory};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -110,8 +109,8 @@ struct State {
 impl State {
     async fn new(window: Window) -> Self {
         let hal_instance = unsafe {
-            Instance::init_with_callback(
-                &wgpu_hal::InstanceDescriptor {
+            hal::vulkan::Instance::init_with_callback(
+                &hal::InstanceDescriptor {
                     name: "wgpu",
                     flags: InstanceFlags::VALIDATION,
                     memory_budget_thresholds: MemoryBudgetThresholds::default(),
@@ -695,7 +694,7 @@ impl State {
             let hal_texture = unsafe {
                 hal_device.texture_from_raw(
                     vk_image,
-                    &wgpu_hal::TextureDescriptor {
+                    &hal::TextureDescriptor {
                         label: Some("Shared Hal texture"),
                         size: wgpu::Extent3d {
                             width: self.width,
@@ -707,11 +706,11 @@ impl State {
                         dimension: wgpu::TextureDimension::D2,
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         usage: TextureUses::COLOR_TARGET | TextureUses::RESOURCE,
-                        memory_flags: wgpu_hal::MemoryFlags::empty(),
+                        memory_flags: hal::MemoryFlags::empty(),
                         view_formats: vec![],
                     },
                     None,
-                    TextureMemory::Dedicated(vk_memory),
+                    hal::vulkan::TextureMemory::Dedicated(vk_memory),
                 )
             };
 

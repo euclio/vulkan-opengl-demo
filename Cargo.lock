@@ -1932,7 +1932,6 @@ dependencies = [
  "pollster",
  "r-egl",
  "wgpu",
- "wgpu-hal",
  "winit",
 ]
 
