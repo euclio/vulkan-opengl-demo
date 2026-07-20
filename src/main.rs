@@ -94,6 +94,8 @@ struct State {
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
+    /// Surface format.
+    format: wgpu::TextureFormat,
     render_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
@@ -153,6 +155,7 @@ impl State {
             .expect("Failed to find a suitable adapter");
 
         let surface_capabilities = surface.get_capabilities(&adapter);
+        let format = surface_capabilities.formats[0];
 
         let hal_adapter = unsafe { adapter.as_hal::<Vulkan>().unwrap() };
         let _raw_physical_device = hal_adapter.raw_physical_device();
@@ -188,7 +191,7 @@ impl State {
             },
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format,
             mip_level_count: 1,
             sample_count: 1,
             view_formats: &[],
@@ -254,7 +257,7 @@ impl State {
                 module: &shader,
                 entry_point: Some("fs"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_capabilities.formats[0],
+                    format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -387,6 +390,7 @@ impl State {
             instance,
             device,
             surface,
+            format,
             adapter,
             queue,
             render_pipeline,
@@ -529,11 +533,26 @@ impl State {
             let hal_device = unsafe { device.as_hal::<Vulkan>() }.unwrap();
             let raw_device = hal_device.raw_device();
 
+            // OpenGL expects RGBA, so allocate the texture with a matching format.
+            let (format, vk_format, gl_format) = if self.format.is_srgb() {
+                (
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                    vk::Format::R8G8B8A8_SRGB,
+                    gl::SRGB8_ALPHA8,
+                )
+            } else {
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    vk::Format::R8G8B8A8_UNORM,
+                    gl::RGBA8,
+                )
+            };
+
             let vk_image = unsafe {
                 raw_device.create_image(
                     &vk::ImageCreateInfo::default()
                         .image_type(vk::ImageType::TYPE_2D)
-                        .format(vk::Format::R8G8B8A8_UNORM)
+                        .format(vk_format)
                         .extent(vk::Extent3D {
                             width: self.width,
                             height: self.height,
@@ -622,7 +641,7 @@ impl State {
                 gl_call!(gl::TextureStorageMem2DEXT(
                     gl_texture,
                     1,
-                    gl::RGBA8,
+                    gl_format,
                     self.width.try_into().unwrap(),
                     self.height.try_into().unwrap(),
                     gl_mem_object,
@@ -661,7 +680,7 @@ impl State {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        format,
                         usage: TextureUses::COLOR_TARGET | TextureUses::RESOURCE,
                         memory_flags: hal::MemoryFlags::empty(),
                         view_formats: vec![],
@@ -684,7 +703,7 @@ impl State {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        format,
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                             | wgpu::TextureUsages::TEXTURE_BINDING,
                         view_formats: &[],
@@ -717,11 +736,10 @@ impl State {
             });
         }
 
-        let cap = surface.get_capabilities(adapter);
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: cap.formats[0],
-            view_formats: vec![cap.formats[0]],
+            format: self.format,
+            view_formats: vec![self.format],
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             width: self.width,
             height: self.height,
